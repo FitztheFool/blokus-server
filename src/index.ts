@@ -7,6 +7,7 @@ import { setupSocketAuth, corsConfig, saveAttemptsAndEmit, connectToLobby } from
 
 import { Room, Player } from './types';
 import { applyMove, passTurn, hasAnyMove, BlokusMove, BlokusState } from './game';
+import { PIECE_SIZE } from './pieces';
 import { pickBotMove } from './bot';
 import { rooms, freshState, roomHasBot, clearTurnTimer, startTurnTimer } from './rooms';
 
@@ -33,6 +34,7 @@ function publicState(room: Room) {
         status: g.status,
         turnStartedAt: room.state.turnStartedAt,
         turnDuration: room.state.turnDuration,
+        log: room.log,
         players: room.players.map(p => ({ userId: p.userId, username: p.username, colorIndex: p.colorIndex })),
     };
 }
@@ -47,14 +49,16 @@ function finishGame(room: Room): void {
     room.state.phase = 'finished';
     room.state.turnStartedAt = null;
     clearTurnTimer(room);
-    emitState(room);
-    io.to(room.lobbyId).emit('blokus:finished', publicState(room));
 
     const ranked = room.players
         .map(p => ({ p, score: g.scores[p.colorIndex] }))
         .sort((a, b) => b.score - a.score);
 
-    const scores = ranked.map(({ p, score }, i) => {
+    if (ranked[0]) pushLog(room, 'coup', `${ranked[0].p.username} gagne avec ${ranked[0].score} cases !`);
+    emitState(room);
+    io.to(room.lobbyId).emit('blokus:finished', publicState(room));
+
+    const scores = ranked.map(({ p, score }) => {
         const placement = 1 + ranked.filter(r => r.score > score).length; // ex-aequo = même rang
         return {
             userId: p.userId,
@@ -100,6 +104,11 @@ function maybeBotMove(room: Room): void {
     }, 700);
 }
 
+function pushLog(room: Room, tone: string, text: string): void {
+    room.log.push({ id: ++room.logSeq, tone, text });
+    if (room.log.length > 80) room.log = room.log.slice(-80);
+}
+
 function handleMove(room: Room, colorIndex: number, move: BlokusMove): void {
     const g = room.state.game;
     if (room.state.phase !== 'playing' || g.currentTurn !== colorIndex) return;
@@ -109,6 +118,8 @@ function handleMove(room: Room, colorIndex: number, move: BlokusMove): void {
         emitState(room);
         return;
     }
+    const name = room.players[colorIndex]?.username ?? `J${colorIndex + 1}`;
+    pushLog(room, 'move', `${name} pose une pièce de ${PIECE_SIZE[move.pieceId]} case${PIECE_SIZE[move.pieceId] > 1 ? 's' : ''}`);
     afterTurn(room);
 }
 
@@ -130,7 +141,7 @@ lobbySocket.on('blokus:configure', ({ lobbyId, players, fresh }: { lobbyId: stri
     rooms.set(lobbyId, {
         lobbyId, players: roster, state: freshState(roster.length),
         turnTimer: null, currentGameId: randomUUID(),
-        disconnectTimers: new Map(), surrendered: new Set(), afk: new Set(),
+        disconnectTimers: new Map(), surrendered: new Set(), afk: new Set(), log: [], logSeq: 0,
     });
     maybeStart(rooms.get(lobbyId)!);
     if (typeof ack === 'function') ack();
@@ -186,6 +197,7 @@ io.on('connection', (socket) => {
         const player = room.players.find(p => p.userId === userId);
         if (!player || room.state.game.currentTurn !== player.colorIndex) return;
         clearTurnTimer(room);
+        pushLog(room, 'system', `${player.username} passe`);
         passTurn(room.state.game);
         afterTurn(room);
     });

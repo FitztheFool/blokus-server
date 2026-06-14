@@ -23,4 +23,6 @@ export interface Room {
     disconnectTimers: Map<string, ReturnType<typeof setTimeout>>;
     surrendered: Set<string>;   // userIds ayant abandonné
     afk: Set<string>;           // userIds inactifs (timeout/déco)
+    log: { id: number; tone: string; text: string }[];
+    logSeq: number;
 }
