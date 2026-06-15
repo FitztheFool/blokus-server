@@ -22,11 +22,12 @@ export function clearTurnTimer(room: Room): void {
 
 export function startTurnTimer(room: Room, onTimeout: (room: Room) => void, resuming = false): void {
     clearTurnTimer(room);
-    let delay = TURN_DURATION * 1000;
+    const dur = room.state.turnDuration ?? TURN_DURATION;
+    if (!resuming) room.state.turnStartedAt = Date.now();
+    if (dur <= 0) return;                              // 0 = pas de limite (jamais AFK)
+    let delay = dur * 1000;
     if (resuming && room.state.turnStartedAt) {
-        delay = Math.max(0, TURN_DURATION * 1000 - (Date.now() - room.state.turnStartedAt));
-    } else {
-        room.state.turnStartedAt = Date.now();
+        delay = Math.max(0, dur * 1000 - (Date.now() - room.state.turnStartedAt));
     }
     room.turnTimer = setTimeout(() => onTimeout(room), delay);
 }

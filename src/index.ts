@@ -129,7 +129,7 @@ setupSocketAuth(io, new TextEncoder().encode((process.env.SOCKET_USER_SECRET ?? 
 
 const lobbySocket = connectToLobby('blokus-server', 'blokus');
 
-lobbySocket.on('blokus:configure', ({ lobbyId, players, fresh }: { lobbyId: string; players?: { userId: string; username: string }[]; fresh?: boolean }, ack?: () => void) => {
+lobbySocket.on('blokus:configure', ({ lobbyId, players, fresh, turnSeconds }: { lobbyId: string; players?: { userId: string; username: string }[]; fresh?: boolean; turnSeconds?: number | null }, ack?: () => void) => {
     if (!lobbyId || !players?.length) return;
     const existing = rooms.get(lobbyId);
     if (existing && existing.state.phase !== 'finished' && !fresh) { if (typeof ack === 'function') ack(); return; }
@@ -138,8 +138,10 @@ lobbySocket.on('blokus:configure', ({ lobbyId, players, fresh }: { lobbyId: stri
     const roster: Player[] = players.slice(0, 4).map((p, i) => ({
         userId: p.userId, username: p.username, socketId: null, colorIndex: i,
     }));
+    const state = freshState(roster.length);
+    if (turnSeconds != null) state.turnDuration = turnSeconds;
     rooms.set(lobbyId, {
-        lobbyId, players: roster, state: freshState(roster.length),
+        lobbyId, players: roster, state,
         turnTimer: null, currentGameId: randomUUID(),
         disconnectTimers: new Map(), surrendered: new Set(), afk: new Set(), log: [], logSeq: 0,
     });
