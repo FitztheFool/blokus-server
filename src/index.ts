@@ -55,19 +55,21 @@ function finishGame(room: Room): void {
     clearTurnTimer(room);
 
     // Score d'un joueur = somme de ses couleurs (1 en standard, 2 en duo).
+    // Un joueur qui a abandonné est classé APRÈS ceux encore en lice (quel que soit son score).
     const ranked = room.players
-        .map(p => ({ p, score: p.colorIndices.reduce((s, c) => s + g.scores[c], 0) }))
-        .sort((a, b) => b.score - a.score);
+        .map(p => ({ p, score: p.colorIndices.reduce((s, c) => s + g.scores[c], 0), out: room.surrendered.has(p.userId) }))
+        .sort((a, b) => (Number(a.out) - Number(b.out)) || (b.score - a.score));
 
     if (ranked[0]) pushLog(room, 'coup', `${ranked[0].p.username} gagne avec ${ranked[0].score} cases !`);
     emitState(room);
     io.to(room.lobbyId).emit('blokus:finished', publicState(room));
 
-    const scores = ranked.map(({ p, score }) => ({
+    const scores = ranked.map(({ p, score, out }) => ({
         userId: p.userId,
         username: p.username,
         score,
-        placement: 1 + ranked.filter(r => r.score > score).length, // ex-aequo = même rang
+        // Abandonneurs après les actifs ; à statut égal, meilleur score devant (ex-aequo = même rang).
+        placement: 1 + ranked.filter(r => (!r.out && out) || (r.out === out && r.score > score)).length,
         ...(room.surrendered.has(p.userId) ? { abandon: true } : {}),
         ...(room.afk.has(p.userId) ? { afk: true } : {}),
     }));
@@ -228,7 +230,9 @@ io.on('connection', (socket) => {
         room.surrendered.add(userId);
         const g = room.state.game;
         for (const c of player.colorIndices) g.passed[c] = true;   // toutes ses couleurs abandonnent
-        // si c'était son tour, on avance ; sinon il sera sauté à son prochain tour
+        // S'il ne reste qu'au plus un participant non-abandonné (ex. 1v1), la partie s'arrête : l'autre gagne.
+        if (room.players.filter(p => !room.surrendered.has(p.userId)).length <= 1) { finishGame(room); return; }
+        // sinon (3-4 joueurs) : si c'était son tour, on avance ; sinon il sera sauté à son prochain tour
         if (player.colorIndices.includes(g.currentTurn)) { clearTurnTimer(room); passTurn(g); afterTurn(room); }
         else if (!room.players.some(p => p.colorIndices.some(c => !g.passed[c] && hasAnyMove(g, c)))) finishGame(room);
         else emitState(room);
