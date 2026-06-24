@@ -1,14 +1,16 @@
-import { Room, RoomState } from './types';
+import { Room, RoomState, Variant } from './types';
 import { initState, TURN_DURATION } from './game';
 
 export const rooms = new Map<string, Room>();
 
-export function freshState(numPlayers: number): RoomState {
+// numColors = nombre de couleurs du plateau (standard : nb joueurs ; duo : 4).
+export function freshState(numColors: number, variant: Variant = 'standard'): RoomState {
     return {
         phase: 'waiting',
-        game: initState(numPlayers),
+        game: initState(numColors),
         turnStartedAt: null,
         turnDuration: TURN_DURATION,
+        variant,
     };
 }
 

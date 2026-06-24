@@ -18,6 +18,8 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: corsConfig, maxHttpBufferSize: 1e6 });
 
 const isBot = (p: Player) => p.userId.startsWith('bot-');
+// Joueur qui contrôle une couleur donnée (standard : 1 couleur/joueur ; duo : 2 couleurs).
+const playerOfColor = (room: Room, color: number): Player | undefined => room.players.find(p => p.colorIndices.includes(color));
 
 // ─── Vue publique ────────────────────────────────────────────────────────────────
 
@@ -35,7 +37,9 @@ function publicState(room: Room) {
         turnStartedAt: room.state.turnStartedAt,
         turnDuration: room.state.turnDuration,
         log: room.log,
-        players: room.players.map(p => ({ userId: p.userId, username: p.username, colorIndex: p.colorIndex })),
+        variant: room.state.variant,
+        // colorIndex (= 1ʳᵉ couleur) gardé pour compat client standard ; colorIndices pour le duo.
+        players: room.players.map(p => ({ userId: p.userId, username: p.username, colorIndex: p.colorIndices[0], colorIndices: p.colorIndices })),
     };
 }
 
@@ -50,25 +54,23 @@ function finishGame(room: Room): void {
     room.state.turnStartedAt = null;
     clearTurnTimer(room);
 
+    // Score d'un joueur = somme de ses couleurs (1 en standard, 2 en duo).
     const ranked = room.players
-        .map(p => ({ p, score: g.scores[p.colorIndex] }))
+        .map(p => ({ p, score: p.colorIndices.reduce((s, c) => s + g.scores[c], 0) }))
         .sort((a, b) => b.score - a.score);
 
     if (ranked[0]) pushLog(room, 'coup', `${ranked[0].p.username} gagne avec ${ranked[0].score} cases !`);
     emitState(room);
     io.to(room.lobbyId).emit('blokus:finished', publicState(room));
 
-    const scores = ranked.map(({ p, score }) => {
-        const placement = 1 + ranked.filter(r => r.score > score).length; // ex-aequo = même rang
-        return {
-            userId: p.userId,
-            username: p.username,
-            score,
-            placement,
-            ...(room.surrendered.has(p.userId) ? { abandon: true } : {}),
-            ...(room.afk.has(p.userId) ? { afk: true } : {}),
-        };
-    });
+    const scores = ranked.map(({ p, score }) => ({
+        userId: p.userId,
+        username: p.username,
+        score,
+        placement: 1 + ranked.filter(r => r.score > score).length, // ex-aequo = même rang
+        ...(room.surrendered.has(p.userId) ? { abandon: true } : {}),
+        ...(room.afk.has(p.userId) ? { afk: true } : {}),
+    }));
 
     saveAttemptsAndEmit(io, room.lobbyId, 'BLOKUS', room.currentGameId ?? room.lobbyId, scores, roomHasBot(room));
 }
@@ -76,7 +78,7 @@ function finishGame(room: Room): void {
 /** Tour expiré → le joueur actif passe (forfait des coups restants). */
 function onTurnTimeout(room: Room): void {
     if (room.state.phase !== 'playing') return;
-    const cur = room.players[room.state.game.currentTurn];
+    const cur = playerOfColor(room, room.state.game.currentTurn);
     if (cur) room.afk.add(cur.userId);
     passTurn(room.state.game);
     afterTurn(room);
@@ -93,7 +95,7 @@ function afterTurn(room: Room): void {
 function maybeBotMove(room: Room): void {
     if (room.state.phase !== 'playing') return;
     const turn = room.state.game.currentTurn;
-    const p = room.players[turn];
+    const p = playerOfColor(room, turn);
     if (!p || !isBot(p)) return;
     setTimeout(() => {
         if (room.state.phase !== 'playing' || room.state.game.currentTurn !== turn) return;
@@ -118,7 +120,7 @@ function handleMove(room: Room, colorIndex: number, move: BlokusMove): void {
         emitState(room);
         return;
     }
-    const name = room.players[colorIndex]?.username ?? `J${colorIndex + 1}`;
+    const name = playerOfColor(room, colorIndex)?.username ?? `J${colorIndex + 1}`;
     pushLog(room, 'move', `${name} pose une pièce de ${PIECE_SIZE[move.pieceId]} case${PIECE_SIZE[move.pieceId] > 1 ? 's' : ''}`);
     afterTurn(room);
 }
@@ -135,10 +137,22 @@ lobbySocket.on('blokus:configure', ({ lobbyId, players, fresh, turnSeconds }: { 
     if (existing && existing.state.phase !== 'finished' && !fresh) { if (typeof ack === 'function') ack(); return; }
     if (existing?.turnTimer) clearTimeout(existing.turnTimer);
 
-    const roster: Player[] = players.slice(0, 4).map((p, i) => ({
-        userId: p.userId, username: p.username, socketId: null, colorIndex: i,
-    }));
-    const state = freshState(roster.length);
+    // 2 participants → duo (chacun 2 couleurs : bleu+rouge vs jaune+vert). 3-4 → standard (1 couleur/joueur).
+    const variant: 'standard' | 'duo' = players.length === 2 ? 'duo' : 'standard';
+    let roster: Player[];
+    let numColors: number;
+    if (variant === 'duo') {
+        roster = players.slice(0, 2).map((p, i) => ({
+            userId: p.userId, username: p.username, socketId: null, colorIndices: i === 0 ? [0, 2] : [1, 3],
+        }));
+        numColors = 4;
+    } else {
+        roster = players.slice(0, 4).map((p, i) => ({
+            userId: p.userId, username: p.username, socketId: null, colorIndices: [i],
+        }));
+        numColors = roster.length;
+    }
+    const state = freshState(numColors, variant);
     if (turnSeconds != null) state.turnDuration = turnSeconds;
     rooms.set(lobbyId, {
         lobbyId, players: roster, state,
@@ -187,8 +201,8 @@ io.on('connection', (socket) => {
         const room = rooms.get(lobbyId);
         if (!room) return;
         const player = room.players.find(p => p.userId === userId);
-        if (!player) return;
-        handleMove(room, player.colorIndex, move);
+        if (!player || !player.colorIndices.includes(room.state.game.currentTurn)) return;
+        handleMove(room, room.state.game.currentTurn, move);
     });
 
     socket.on('blokus:pass', () => {
@@ -197,7 +211,7 @@ io.on('connection', (socket) => {
         const room = rooms.get(lobbyId);
         if (!room || room.state.phase !== 'playing') return;
         const player = room.players.find(p => p.userId === userId);
-        if (!player || room.state.game.currentTurn !== player.colorIndex) return;
+        if (!player || !player.colorIndices.includes(room.state.game.currentTurn)) return;
         clearTurnTimer(room);
         pushLog(room, 'system', `${player.username} passe`);
         passTurn(room.state.game);
@@ -213,10 +227,10 @@ io.on('connection', (socket) => {
         if (!player) return;
         room.surrendered.add(userId);
         const g = room.state.game;
-        g.passed[player.colorIndex] = true;
+        for (const c of player.colorIndices) g.passed[c] = true;   // toutes ses couleurs abandonnent
         // si c'était son tour, on avance ; sinon il sera sauté à son prochain tour
-        if (g.currentTurn === player.colorIndex) { clearTurnTimer(room); passTurn(g); afterTurn(room); }
-        else if (!room.players.some(p => !g.passed[p.colorIndex] && hasAnyMove(g, p.colorIndex))) finishGame(room);
+        if (player.colorIndices.includes(g.currentTurn)) { clearTurnTimer(room); passTurn(g); afterTurn(room); }
+        else if (!room.players.some(p => p.colorIndices.some(c => !g.passed[c] && hasAnyMove(g, c)))) finishGame(room);
         else emitState(room);
     });
 
@@ -238,10 +252,10 @@ io.on('connection', (socket) => {
                 if (room.state.phase !== 'playing') return;
                 const g = room.state.game;
                 room.afk.add(userId);
-                g.passed[player.colorIndex] = true;
+                for (const c of player.colorIndices) g.passed[c] = true;
                 io.to(lobbyId).emit('blokus:playerKicked', { userId, username: player.username, reason: 'disconnect' });
-                if (g.currentTurn === player.colorIndex) { clearTurnTimer(room); passTurn(g); afterTurn(room); }
-                else if (!room.players.some(p => !g.passed[p.colorIndex] && hasAnyMove(g, p.colorIndex))) finishGame(room);
+                if (player.colorIndices.includes(g.currentTurn)) { clearTurnTimer(room); passTurn(g); afterTurn(room); }
+                else if (!room.players.some(p => p.colorIndices.some(c => !g.passed[c] && hasAnyMove(g, c)))) finishGame(room);
                 else emitState(room);
             }, 60_000);
             room.disconnectTimers.set(userId, timer);
